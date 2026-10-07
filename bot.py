@@ -8,7 +8,10 @@ from pathlib import Path
 
 import openpyxl
 import requests
+from dotenv import load_dotenv
 
+
+load_dotenv()
 
 BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN", "").strip()
 SOURCE_CHANNEL_ID = os.environ.get("BALE_SOURCE_CHANNEL_ID", "").strip()
@@ -200,7 +203,34 @@ def extract_document(update):
     return message, document
 
 
+def handle_setup_commands(update):
+    message = update.get("message")
+    if not isinstance(message, dict):
+        return False
+
+    text = str(message.get("text") or "").strip().lower()
+    if text not in {"/id", "/start"}:
+        return False
+
+    chat = message.get("chat") or {}
+    chat_id = str(chat.get("id", ""))
+    if not chat_id:
+        return True
+
+    if text == "/id":
+        send_message(chat_id, f"Chat ID: {chat_id}")
+    else:
+        send_message(
+            chat_id,
+            "ربات فعال است. برای دیدن شناسه این چت دستور /id را بفرست.",
+        )
+    return True
+
+
 def handle_update(update, processed: set[str]):
+    if handle_setup_commands(update):
+        return
+
     message, document = extract_document(update)
     if not document:
         return
