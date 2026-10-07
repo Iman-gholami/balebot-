@@ -1,11 +1,12 @@
 import asyncio
+import csv
 import json
 import logging
 import os
 import re
 import zipfile
 from datetime import datetime
-from io import BytesIO
+from io import BytesIO, StringIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
 
@@ -156,6 +157,60 @@ def _extract_rows_from_xlsx(excel_bytes: bytes):
     return result
 
 
+def _extract_rows_from_csv(csv_bytes: bytes):
+    text = None
+    for encoding in ("utf-8-sig", "utf-8", "cp1256", "latin-1"):
+        try:
+            text = csv_bytes.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+
+    if text is None:
+        raise RuntimeError("Could not decode CSV file.")
+
+    sample = text[:4096]
+    try:
+        dialect = csv.Sniffer().sniff(sample, delimiters=",;\t|")
+    except csv.Error:
+        dialect = csv.excel
+
+    reader = csv.reader(StringIO(text), dialect)
+    rows = list(reader)
+    if not rows:
+        raise RuntimeError("CSV file is empty.")
+
+    headers = [normalize_header(v) for v in rows[0]]
+    ip_col = next((i for i, h in enumerate(headers) if h in IP_HEADER_NAMES), None)
+    country_col = next(
+        (i for i, h in enumerate(headers) if h in COUNTRY_HEADER_NAMES), None
+    )
+
+    data_rows = rows[1:]
+    if ip_col is None:
+        ip_col = 0
+        country_col = 1 if len(rows[0]) > 1 else None
+        data_rows = rows
+
+    result = []
+    for row in data_rows:
+        if ip_col >= len(row):
+            continue
+        ip = row[ip_col]
+        if not is_valid_ipv4(ip):
+            continue
+
+        country = ""
+        if country_col is not None and country_col < len(row):
+            country = str(row[country_col]).strip()
+
+        result.append((str(ip).strip(), country))
+        if len(result) == 10:
+            break
+
+    return result
+
+
 def extract_first_ten(file_bytes: bytes):
     """
     Accept either a direct .xlsx file or a ZIP/archive containing an .xlsx file.
@@ -181,34 +236,36 @@ def extract_first_ten(file_bytes: bytes):
         candidates = [
             name for name in names
             if not name.endswith("/")
-            and name.lower().endswith(".xlsx")
+            and name.lower().endswith((".xlsx", ".csv"))
             and not name.startswith("__MACOSX/")
         ]
 
         if not candidates:
             visible = ", ".join(names[:20])
             raise RuntimeError(
-                "Archive opened successfully, but no .xlsx file was found inside. "
+                "Archive opened successfully, but no .xlsx or .csv file was found inside. "
                 f"First archive entries: {visible}"
             )
 
-        # Prefer a workbook whose name resembles the NEW_FIRE package name.
         candidates.sort(
             key=lambda name: (
                 0 if "new_fire" in name.lower() else 1,
+                0 if name.lower().endswith(".csv") else 1,
                 len(name),
             )
         )
-        workbook_name = candidates[0]
-        log.info("Excel workbook found inside archive: %s", workbook_name)
+        data_name = candidates[0]
+        log.info("Data file found inside archive: %s", data_name)
 
-        info = archive.getinfo(workbook_name)
+        info = archive.getinfo(data_name)
         if info.file_size > 100 * 1024 * 1024:
-            raise RuntimeError("Excel file inside archive is unexpectedly large (>100 MB).")
+            raise RuntimeError("Data file inside archive is unexpectedly large (>100 MB).")
 
-        workbook_bytes = archive.read(workbook_name)
+        data_bytes = archive.read(data_name)
 
-    return _extract_rows_from_xlsx(workbook_bytes)
+    if data_name.lower().endswith(".csv"):
+        return _extract_rows_from_csv(data_bytes)
+    return _extract_rows_from_xlsx(data_bytes)
 
 
 def build_message(file_name: str, rows) -> str:
