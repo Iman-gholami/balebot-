@@ -157,3 +157,23 @@ HISTORY_LIMIT=100
 ```
 
 اگر کانال در یک روز بیشتر از ۱۰۰ پیام دارد، `HISTORY_LIMIT` را بیشتر کنید.
+
+
+## اجرای خودکار روزانه ساعت ۱۲
+
+برنامه اکنون بعد از ارسال موفق خروجی همان روز بسته می‌شود. اگر فایل هنوز منتشر نشده باشد، هر `CHECK_INTERVAL` ثانیه دوباره بررسی می‌کند و حداکثر تا `MAX_WAIT_MINUTES` دقیقه منتظر می‌ماند.
+
+پیشنهاد:
+
+```text
+CHECK_INTERVAL=60
+MAX_WAIT_MINUTES=360
+```
+
+برای اجرای روزانه با cron، مسیر Python داخل virtualenv را مستقیماً استفاده کنید. نمونه:
+
+```cron
+0 12 * * * cd /home/thomas/balebot- && /home/thomas/balebot-/.venv/bin/python bot.py >> /home/thomas/balebot-/bot.log 2>&1
+```
+
+زمان cron بر اساس timezone سیستم VPS است. برای اجرای ساعت ۱۲ ایران، timezone سیستم/cron باید Asia/Tehran باشد یا زمان معادل آن تنظیم شود.
