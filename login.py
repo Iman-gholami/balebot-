@@ -13,7 +13,7 @@ def normalize_phone(value: str) -> int:
     if value.startswith("0"):
         value = "98" + value[1:]
     if not value.isdigit():
-        raise ValueError("شماره موبایل نامعتبر است.")
+        raise ValueError("Invalid mobile number.")
     return int(value)
 
 
@@ -38,18 +38,18 @@ def upsert_env(key: str, value: str):
 
 def main():
     load_dotenv()
-    print("ورود به اکانت بله با OTP")
-    phone = normalize_phone(input("شماره موبایل بله (مثال 0912... یا +98912...): "))
+    print("Bale account login with OTP")
+    phone = normalize_phone(input("Bale mobile number (example: 0912... or +98912...): "))
 
     session = auth.start_phone_auth(phone)
-    print("کد ورود ارسال شد.")
-    code = input("کد OTP: ").strip()
+    print("Login code sent.")
+    code = input("OTP code: ").strip()
 
     result = auth.validate_code(session.transaction_hash, code)
     upsert_env("BALE_TOKEN", result.access_token)
 
-    print("ورود موفق بود.")
-    print("توکن داخل فایل .env ذخیره شد و نباید در GitHub قرار بگیرد.")
+    print("Login successful.")
+    print("The token was saved to the .env file. Do not commit it to GitHub.")
 
 
 if __name__ == "__main__":
