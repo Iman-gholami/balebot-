@@ -26,6 +26,7 @@ SOURCE = os.environ.get("BALE_SOURCE", "").strip()
 DESTINATION = os.environ.get("BALE_DESTINATION", "").strip()
 TIMEZONE = os.environ.get("BALE_TIMEZONE", "Asia/Tehran").strip()
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
+MAX_WAIT_MINUTES = int(os.environ.get("MAX_WAIT_MINUTES", "360"))
 HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "100"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "processed_files.json"))
 
@@ -403,11 +404,24 @@ async def main():
             expected_filename(),
         )
 
+        deadline = asyncio.get_running_loop().time() + (MAX_WAIT_MINUTES * 60)
+
         while True:
             try:
-                await process_once(client, source_ref, processed)
+                done = await process_once(client, source_ref, processed)
+                if done:
+                    log.info("Daily job completed. Exiting.")
+                    return
             except Exception:
                 log.exception("Daily processing failed.")
+
+            if asyncio.get_running_loop().time() >= deadline:
+                log.warning(
+                    "Today's file was not successfully processed within %s minutes. Exiting.",
+                    MAX_WAIT_MINUTES,
+                )
+                return
+
             await asyncio.sleep(CHECK_INTERVAL)
 
 
