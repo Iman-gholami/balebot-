@@ -1,8 +1,8 @@
+import asyncio
 import json
 import logging
 import os
 import re
-import time
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -13,78 +13,44 @@ import openpyxl
 import requests
 from dotenv import load_dotenv
 
+from bale import BaleClient, bale_pb2 as pb
+from bale.peer import Peer
+
 
 load_dotenv()
 
-BOT_TOKEN = os.environ.get("BALE_BOT_TOKEN", "").strip()
-SOURCE_CHANNEL_ID = os.environ.get("BALE_SOURCE_CHANNEL_ID", "").strip()
-DESTINATION_CHAT_ID = os.environ.get("BALE_DESTINATION_CHAT_ID", "").strip()
-
-API_BASE = os.environ.get("BALE_API_BASE", "https://tapi.bale.ai").rstrip("/")
-STATE_FILE = Path(os.environ.get("STATE_FILE", "processed_files.json"))
-POLL_TIMEOUT = int(os.environ.get("POLL_TIMEOUT", "25"))
+BALE_TOKEN = os.environ.get("BALE_TOKEN", "").strip()
+SOURCE = os.environ.get("BALE_SOURCE", "").strip()
+DESTINATION = os.environ.get("BALE_DESTINATION", "").strip()
 TIMEZONE = os.environ.get("BALE_TIMEZONE", "Asia/Tehran").strip()
-
-FILE_PATTERN = re.compile(
-    r"^NEW_FIRE_(\d{8})_IPS(?:\.xlsx?)?$",
-    re.IGNORECASE,
-)
+CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
+HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "100"))
+STATE_FILE = Path(os.environ.get("STATE_FILE", "processed_files.json"))
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
     format="%(asctime)s | %(levelname)s | %(message)s",
 )
-log = logging.getLogger("bale-fire-bot")
+log = logging.getLogger("bale-fire-userbot")
 
 
-def api_url(method: str) -> str:
-    return f"{API_BASE}/bot{BOT_TOKEN}/{method}"
+def today_jalali_code() -> str:
+    local_date = datetime.now(ZoneInfo(TIMEZONE)).date()
+    jalali = jdatetime.date.fromgregorian(date=local_date)
+    return f"{jalali.year:04d}{jalali.month:02d}{jalali.day:02d}"
 
 
-def bale_request(method: str, data=None, timeout=40):
-    response = requests.post(api_url(method), data=data or {}, timeout=timeout)
-    response.raise_for_status()
-    payload = response.json()
-    if not payload.get("ok"):
-        raise RuntimeError(payload.get("description") or f"Bale API error in {method}")
-    return payload.get("result")
+def expected_filename() -> str:
+    return f"NEW_FIRE_{today_jalali_code()}_IPS.xlsx"
 
 
-def get_updates(offset: int):
-    return bale_request(
-        "getUpdates",
-        {"offset": offset, "timeout": POLL_TIMEOUT},
-        timeout=POLL_TIMEOUT + 15,
-    )
-
-
-def send_message(chat_id: str, text: str):
-    return bale_request("sendMessage", {"chat_id": chat_id, "text": text})
-
-
-def get_file_path(file_id: str) -> str:
-    result = bale_request("getFile", {"file_id": file_id})
-    file_path = result.get("file_path") if isinstance(result, dict) else None
-    if not file_path:
-        raise RuntimeError("getFile returned no file_path")
-    return file_path
-
-
-def download_file(file_path: str) -> bytes:
-    candidates = [
-        f"{API_BASE}/file/bot{BOT_TOKEN}/{file_path}",
-        f"{API_BASE}/file/{BOT_TOKEN}/{file_path}",
-    ]
-    last_error = None
-    for url in candidates:
-        try:
-            response = requests.get(url, timeout=60)
-            if response.ok and response.content:
-                return response.content
-            last_error = RuntimeError(f"download failed: HTTP {response.status_code}")
-        except Exception as exc:
-            last_error = exc
-    raise RuntimeError(f"Could not download file: {last_error}")
+def ref_from_config(value: str):
+    value = value.strip()
+    if value.startswith("user:"):
+        return Peer.user(int(value.split(":", 1)[1]))
+    if value.startswith("channel:") or value.startswith("group:"):
+        return Peer.channel(int(value.split(":", 1)[1]))
+    return value
 
 
 def load_processed() -> set[str]:
@@ -94,7 +60,7 @@ def load_processed() -> set[str]:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
         return set(data if isinstance(data, list) else [])
     except Exception:
-        log.exception("Could not read state file; starting with empty state.")
+        log.exception("Could not read state file; starting empty.")
         return set()
 
 
@@ -103,17 +69,6 @@ def save_processed(processed: set[str]):
         json.dumps(sorted(processed), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
-
-
-def today_jalali_code() -> str:
-    """Return today's Jalali date as YYYYMMDD, e.g. 14050717."""
-    local_date = datetime.now(ZoneInfo(TIMEZONE)).date()
-    jalali = jdatetime.date.fromgregorian(date=local_date)
-    return f"{jalali.year:04d}{jalali.month:02d}{jalali.day:02d}"
-
-
-def expected_filename() -> str:
-    return f"NEW_FIRE_{today_jalali_code()}_IPS.xlsx"
 
 
 def normalize_header(value) -> str:
@@ -139,12 +94,13 @@ def find_columns(ws):
 
     headers = [normalize_header(v) for v in first]
     ip_col = next((i for i, h in enumerate(headers) if h in IP_HEADER_NAMES), None)
-    country_col = next((i for i, h in enumerate(headers) if h in COUNTRY_HEADER_NAMES), None)
+    country_col = next(
+        (i for i, h in enumerate(headers) if h in COUNTRY_HEADER_NAMES), None
+    )
 
     if ip_col is not None:
         return rows, ip_col, country_col
 
-    # If there is no recognizable header, treat the first row as data.
     def with_first():
         yield first
         yield from rows
@@ -152,7 +108,7 @@ def find_columns(ws):
     return with_first(), 0, 1 if len(first) > 1 else None
 
 
-def is_valid_ip(value) -> bool:
+def is_valid_ipv4(value) -> bool:
     if value is None:
         return False
     text = str(value).strip()
@@ -176,11 +132,15 @@ def extract_first_ten(excel_bytes: bytes):
         if ip_col >= len(row):
             continue
         ip = row[ip_col]
-        if not is_valid_ip(ip):
+        if not is_valid_ipv4(ip):
             continue
 
         country = ""
-        if country_col is not None and country_col < len(row) and row[country_col] is not None:
+        if (
+            country_col is not None
+            and country_col < len(row)
+            and row[country_col] is not None
+        ):
             country = str(row[country_col]).strip()
 
         result.append((str(ip).strip(), country))
@@ -191,144 +151,145 @@ def extract_first_ten(excel_bytes: bytes):
     return result
 
 
-def build_message(base_name: str, rows) -> str:
-    lines = [base_name, ""]
-    for idx, (ip, country) in enumerate(rows, 1):
+def build_message(file_name: str, rows) -> str:
+    base = re.sub(r"\.xlsx?$", "", file_name, flags=re.IGNORECASE)
+    lines = [base, ""]
+    for index, (ip, country) in enumerate(rows, 1):
         suffix = f" - {country}" if country else ""
-        lines.append(f"{idx}. {ip}{suffix}")
+        lines.append(f"{index}. {ip}{suffix}")
     return "\n".join(lines)
 
 
-def extract_document(update):
-    # Channel posts normally arrive under channel_post. message is supported too
-    # so the same bot can be tested in a private/group chat.
-    message = update.get("channel_post") or update.get("message")
-    if not isinstance(message, dict):
-        return None, None
+async def resolve_source(client: BaleClient):
+    configured = ref_from_config(SOURCE)
+    if SOURCE.startswith("@") or SOURCE.startswith("channel:") or SOURCE.startswith("group:"):
+        return configured
 
-    chat = message.get("chat") or {}
-    chat_id = str(chat.get("id", ""))
-    if SOURCE_CHANNEL_ID and chat_id != SOURCE_CHANNEL_ID:
-        return None, None
+    # Convenience: allow exact channel title from dialog list.
+    dialogs = await client.get_dialogs(limit=300)
+    matches = [d for d in dialogs if (d.title or "").strip() == SOURCE]
+    if len(matches) == 1:
+        return matches[0].peer
+    if not matches:
+        raise RuntimeError(
+            f"Source {SOURCE!r} not found. Run: python list_dialogs.py"
+        )
+    raise RuntimeError(
+        f"More than one dialog is named {SOURCE!r}; use channel:<ID> from list_dialogs.py"
+    )
 
-    document = message.get("document")
-    if not isinstance(document, dict):
-        return None, None
 
-    return message, document
+async def get_download_url(client: BaleClient, media) -> tuple[str, dict]:
+    req = pb.GetNasimFileUrlRequest()
+    req.file.fileId = int(media.file_id)
+    req.file.accessHash = int(media.access_hash)
+
+    resp = await client.files.GetNasimFileUrl(req)
+    file_url = resp.fileUrl
+
+    url = getattr(file_url, "url", "") or ""
+    headers = {}
+
+    # Some Bale file responses use an unsigned URL plus required headers.
+    try:
+        if not url and file_url.HasField("unsignedUrl"):
+            url = file_url.unsignedUrl.value
+    except Exception:
+        pass
+
+    for item in getattr(file_url, "unsignedUrlHeaders", []) or []:
+        key = getattr(item, "key", "") or ""
+        value = getattr(item, "value", "") or ""
+        if key:
+            headers[key] = value
+
+    if not url:
+        raise RuntimeError("Bale returned an empty download URL")
+    return url, headers
 
 
-def handle_setup_commands(update):
-    message = update.get("message")
-    if not isinstance(message, dict):
+async def download_media(client: BaleClient, media) -> bytes:
+    url, headers = await get_download_url(client, media)
+
+    def _download():
+        response = requests.get(url, headers=headers, timeout=90)
+        response.raise_for_status()
+        return response.content
+
+    return await asyncio.to_thread(_download)
+
+
+async def find_today_file(client: BaleClient, source_ref):
+    target = expected_filename().lower()
+    async for message in client.iter_messages(source_ref, limit=HISTORY_LIMIT):
+        content = message.content
+        media = getattr(content, "media", None)
+        if not media:
+            continue
+        name = (media.name or "").strip()
+        if name.lower() == target:
+            return message, media
+    return None, None
+
+
+async def process_once(client: BaleClient, source_ref, processed: set[str]) -> bool:
+    message, media = await find_today_file(client, source_ref)
+    if not media:
+        log.info("Today's file not found yet: %s", expected_filename())
         return False
 
-    text = str(message.get("text") or "").strip().lower()
-    if text not in {"/id", "/start"}:
-        return False
-
-    chat = message.get("chat") or {}
-    chat_id = str(chat.get("id", ""))
-    if not chat_id:
+    key = f"{today_jalali_code()}:{media.file_id}:{message.rid}"
+    if key in processed:
+        log.info("Already processed today: %s", media.name)
         return True
 
-    if text == "/id":
-        send_message(chat_id, f"Chat ID: {chat_id}")
-    else:
-        send_message(
-            chat_id,
-            "ربات فعال است. برای دیدن شناسه این چت دستور /id را بفرست.",
+    log.info("Found today's file: %s", media.name)
+    excel_bytes = await download_media(client, media)
+    rows = extract_first_ten(excel_bytes)
+
+    if len(rows) < 10:
+        raise RuntimeError(
+            f"Only {len(rows)} valid IPv4 rows found in {media.name}; expected at least 10"
         )
+
+    await client.send_message(ref_from_config(DESTINATION), build_message(media.name, rows))
+
+    processed.add(key)
+    save_processed(processed)
+    log.info("Sent 10 IP rows to destination.")
     return True
 
 
-def handle_update(update, processed: set[str]):
-    if handle_setup_commands(update):
-        return
+async def main():
+    if not BALE_TOKEN:
+        raise SystemExit("BALE_TOKEN is missing. Run: python login.py")
+    if not SOURCE:
+        raise SystemExit("BALE_SOURCE is missing. Run: python list_dialogs.py")
+    if not DESTINATION:
+        raise SystemExit("BALE_DESTINATION is missing. Run: python list_dialogs.py")
 
-    message, document = extract_document(update)
-    if not document:
-        return
-
-    file_name = (document.get("file_name") or "").strip()
-    match = FILE_PATTERN.match(file_name)
-    if not match:
-        return
-
-    file_date = match.group(1)
-    today_code = today_jalali_code()
-    if file_date != today_code:
-        log.info(
-            "Ignoring %s because today's Jalali file is NEW_FIRE_%s_IPS.xlsx",
-            file_name,
-            today_code,
-        )
-        return
-
-    # Some clients may omit the extension in the displayed name.
-    logical_name = re.sub(r"\.xlsx?$", "", file_name, flags=re.IGNORECASE)
-    file_id = str(document.get("file_id") or "")
-    unique_key = file_id or logical_name
-
-    if unique_key in processed:
-        log.info("Already processed: %s", file_name)
-        return
-
-    if not DESTINATION_CHAT_ID:
-        raise RuntimeError(
-            "BALE_DESTINATION_CHAT_ID is not configured yet. Send /id to the bot from the destination account, then set it in .env."
-        )
-
-    log.info("Processing %s", file_name)
-
-    file_path = get_file_path(file_id)
-    content = download_file(file_path)
-    rows = extract_first_ten(content)
-
-    if len(rows) < 10:
-        raise ValueError(f"Only {len(rows)} valid IP rows found in {file_name}; expected at least 10")
-
-    text = build_message(logical_name, rows)
-    send_message(DESTINATION_CHAT_ID, text)
-
-    processed.add(unique_key)
-    save_processed(processed)
-    log.info("Sent first 10 IPs from %s", file_name)
-
-
-def validate_config():
-    if not BOT_TOKEN:
-        raise SystemExit("Missing required environment variable: BALE_BOT_TOKEN")
-
-
-def main():
-    validate_config()
     processed = load_processed()
-    offset = 0
 
-    log.info(
-        "Bot started. Today's target file: %s (timezone=%s)",
-        expected_filename(),
-        TIMEZONE,
-    )
+    async with BaleClient(BALE_TOKEN) as client:
+        me = await client.get_me()
+        log.info("Logged in as %s (user id=%s)", me.title, me.peer.id)
 
-    while True:
-        try:
-            updates = get_updates(offset)
-            for update in updates or []:
-                update_id = int(update.get("update_id", 0))
-                offset = max(offset, update_id + 1)
-                try:
-                    handle_update(update, processed)
-                except Exception:
-                    log.exception("Failed to process update_id=%s", update_id)
-        except KeyboardInterrupt:
-            log.info("Stopped.")
-            return
-        except Exception:
-            log.exception("Polling error; retrying shortly.")
-            time.sleep(5)
+        source_ref = await resolve_source(client)
+        source_info = await client.resolve(source_ref)
+        log.info(
+            "Source: %s (id=%s). Today's target: %s",
+            source_info.title,
+            source_info.peer.id,
+            expected_filename(),
+        )
+
+        while True:
+            try:
+                await process_once(client, source_ref, processed)
+            except Exception:
+                log.exception("Daily processing failed.")
+            await asyncio.sleep(CHECK_INTERVAL)
 
 
 if __name__ == "__main__":
-    main()
+    asyncio.run(main())
