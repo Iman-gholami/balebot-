@@ -13,7 +13,7 @@ import openpyxl
 import requests
 from dotenv import load_dotenv
 
-from bale import BaleClient, bale_pb2 as pb
+from bale import BaleClient, pb
 from bale.peer import Peer
 
 
