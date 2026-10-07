@@ -3,6 +3,7 @@ import json
 import logging
 import os
 import re
+import zipfile
 from datetime import datetime
 from io import BytesIO
 from pathlib import Path
@@ -126,7 +127,7 @@ def is_valid_ipv4(value) -> bool:
     return all(0 <= n <= 255 for n in nums)
 
 
-def extract_first_ten(excel_bytes: bytes):
+def _extract_rows_from_xlsx(excel_bytes: bytes):
     wb = openpyxl.load_workbook(BytesIO(excel_bytes), read_only=True, data_only=True)
     ws = wb.active
     rows, ip_col, country_col = find_columns(ws)
@@ -153,6 +154,61 @@ def extract_first_ten(excel_bytes: bytes):
 
     wb.close()
     return result
+
+
+def extract_first_ten(file_bytes: bytes):
+    """
+    Accept either a direct .xlsx file or a ZIP/archive containing an .xlsx file.
+    Bale news channels may publish a container named NEW_FIRE_..._IPS with the
+    actual Excel workbook inside it.
+    """
+    stream = BytesIO(file_bytes)
+
+    if not zipfile.is_zipfile(stream):
+        raise RuntimeError(
+            "Downloaded file is neither an XLSX/ZIP file nor a supported archive."
+        )
+
+    stream.seek(0)
+    with zipfile.ZipFile(stream) as archive:
+        names = archive.namelist()
+
+        # A real XLSX is itself a ZIP and contains [Content_Types].xml.
+        if "[Content_Types].xml" in names and "xl/workbook.xml" in names:
+            return _extract_rows_from_xlsx(file_bytes)
+
+        # Otherwise treat it as an outer archive and find the workbook inside.
+        candidates = [
+            name for name in names
+            if not name.endswith("/")
+            and name.lower().endswith(".xlsx")
+            and not name.startswith("__MACOSX/")
+        ]
+
+        if not candidates:
+            visible = ", ".join(names[:20])
+            raise RuntimeError(
+                "Archive opened successfully, but no .xlsx file was found inside. "
+                f"First archive entries: {visible}"
+            )
+
+        # Prefer a workbook whose name resembles the NEW_FIRE package name.
+        candidates.sort(
+            key=lambda name: (
+                0 if "new_fire" in name.lower() else 1,
+                len(name),
+            )
+        )
+        workbook_name = candidates[0]
+        log.info("Excel workbook found inside archive: %s", workbook_name)
+
+        info = archive.getinfo(workbook_name)
+        if info.file_size > 100 * 1024 * 1024:
+            raise RuntimeError("Excel file inside archive is unexpectedly large (>100 MB).")
+
+        workbook_bytes = archive.read(workbook_name)
+
+    return _extract_rows_from_xlsx(workbook_bytes)
 
 
 def build_message(file_name: str, rows) -> str:
