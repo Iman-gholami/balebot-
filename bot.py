@@ -249,6 +249,11 @@ def handle_update(update, processed: set[str]):
         log.info("Already processed: %s", file_name)
         return
 
+    if not DESTINATION_CHAT_ID:
+        raise RuntimeError(
+            "BALE_DESTINATION_CHAT_ID is not configured yet. Send /id to the bot from the destination account, then set it in .env."
+        )
+
     log.info("Processing %s", file_name)
 
     file_path = get_file_path(file_id)
@@ -267,13 +272,8 @@ def handle_update(update, processed: set[str]):
 
 
 def validate_config():
-    missing = []
     if not BOT_TOKEN:
-        missing.append("BALE_BOT_TOKEN")
-    if not DESTINATION_CHAT_ID:
-        missing.append("BALE_DESTINATION_CHAT_ID")
-    if missing:
-        raise SystemExit("Missing required environment variables: " + ", ".join(missing))
+        raise SystemExit("Missing required environment variable: BALE_BOT_TOKEN")
 
 
 def main():
