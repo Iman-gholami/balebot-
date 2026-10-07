@@ -1,0 +1,1 @@
+openpyxl>=3.1,<4\nrequests>=2.31,<3\n
