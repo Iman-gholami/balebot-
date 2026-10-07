@@ -3,9 +3,12 @@ import logging
 import os
 import re
 import time
+from datetime import datetime
 from io import BytesIO
 from pathlib import Path
+from zoneinfo import ZoneInfo
 
+import jdatetime
 import openpyxl
 import requests
 from dotenv import load_dotenv
@@ -20,6 +23,7 @@ DESTINATION_CHAT_ID = os.environ.get("BALE_DESTINATION_CHAT_ID", "").strip()
 API_BASE = os.environ.get("BALE_API_BASE", "https://tapi.bale.ai").rstrip("/")
 STATE_FILE = Path(os.environ.get("STATE_FILE", "processed_files.json"))
 POLL_TIMEOUT = int(os.environ.get("POLL_TIMEOUT", "25"))
+TIMEZONE = os.environ.get("BALE_TIMEZONE", "Asia/Tehran").strip()
 
 FILE_PATTERN = re.compile(
     r"^NEW_FIRE_(\d{8})_IPS(?:\.xlsx?)?$",
@@ -99,6 +103,17 @@ def save_processed(processed: set[str]):
         json.dumps(sorted(processed), ensure_ascii=False, indent=2),
         encoding="utf-8",
     )
+
+
+def today_jalali_code() -> str:
+    """Return today's Jalali date as YYYYMMDD, e.g. 14050717."""
+    local_date = datetime.now(ZoneInfo(TIMEZONE)).date()
+    jalali = jdatetime.date.fromgregorian(date=local_date)
+    return f"{jalali.year:04d}{jalali.month:02d}{jalali.day:02d}"
+
+
+def expected_filename() -> str:
+    return f"NEW_FIRE_{today_jalali_code()}_IPS.xlsx"
 
 
 def normalize_header(value) -> str:
@@ -240,6 +255,16 @@ def handle_update(update, processed: set[str]):
     if not match:
         return
 
+    file_date = match.group(1)
+    today_code = today_jalali_code()
+    if file_date != today_code:
+        log.info(
+            "Ignoring %s because today's Jalali file is NEW_FIRE_%s_IPS.xlsx",
+            file_name,
+            today_code,
+        )
+        return
+
     # Some clients may omit the extension in the displayed name.
     logical_name = re.sub(r"\.xlsx?$", "", file_name, flags=re.IGNORECASE)
     file_id = str(document.get("file_id") or "")
@@ -281,7 +306,11 @@ def main():
     processed = load_processed()
     offset = 0
 
-    log.info("Bot started. Waiting for NEW_FIRE_YYYYMMDD_IPS Excel files...")
+    log.info(
+        "Bot started. Today's target file: %s (timezone=%s)",
+        expected_filename(),
+        TIMEZONE,
+    )
 
     while True:
         try:
