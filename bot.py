@@ -269,8 +269,11 @@ def extract_first_ten(file_bytes: bytes):
 
 
 def build_message(file_name: str, rows) -> str:
-    base = re.sub(r"\.xlsx?$", "", file_name, flags=re.IGNORECASE)
-    lines = [base, ""]
+    lines = [
+        "🔔 معرفی جهت مسدودسازی",
+        "📋 فهرست آدرس‌های پویشگر خارجی:",
+        "",
+    ]
     for index, (ip, country) in enumerate(rows, 1):
         suffix = f" - {country}" if country else ""
         lines.append(f"{index}. {ip}{suffix}")
