@@ -1,109 +1,118 @@
-# Bale NEW_FIRE automation
+# Bale NEW_FIRE Automation — User Account Mode
 
-این ربات کانال بله را برای فایل‌های روزانه با این الگو بررسی می‌کند:
+این نسخه برای حالتی است که کانال خبرگزاری مال شما نیست و اکانت شخصی شما عضو آن کانال است.
+
+برنامه با اکانت واقعی بله شما وارد می‌شود، تاریخ شمسی امروز را می‌سازد و در history کانال دنبال فایل دقیق همان روز می‌گردد.
+
+مثال:
 
 ```text
-NEW_FIRE_14050715_IPS.xlsx
-NEW_FIRE_14050716_IPS.xlsx
-NEW_FIRE_14050717_IPS.xlsx
+1405/07/17 -> NEW_FIRE_14050717_IPS.xlsx
+1405/07/18 -> NEW_FIRE_14050718_IPS.xlsx
 ```
 
-به‌محض رسیدن فایل مطابق الگو:
+پس از پیدا کردن فایل:
 
-1. فایل Excel را از بله دانلود می‌کند.
-2. ۱۰ IP معتبر اول را پیدا می‌کند.
-3. نام/کد کشور همان ردیف را هم برمی‌دارد.
-4. هر ۱۰ مورد را در یک پیام به اکانت مقصد در بله می‌فرستد.
-5. فایل پردازش‌شده را ثبت می‌کند تا دوباره ارسال نشود.
+1. Excel را دانلود می‌کند.
+2. ۱۰ IPv4 معتبر اول را پیدا می‌کند.
+3. Country همان ردیف را برمی‌دارد.
+4. همه را در یک پیام برای مقصد می‌فرستد.
+5. نتیجه را در `processed_files.json` ثبت می‌کند تا دوباره ارسال نشود.
 
-## پیش‌نیاز
+> این پروژه از `bale-sdk` استفاده می‌کند که یک کلاینت غیررسمی برای API وب بله است. ممکن است با تغییرات بله نیاز به اصلاح پیدا کند.
 
-- Python 3.10 یا جدیدتر
-- یک Bot در بله
-- اضافه‌کردن Bot به کانال مبدا
-- اکانت مقصد باید یک بار Bot را باز کند و `/start` بزند
+## 1) نصب
 
-## نصب
-
-### Linux
-
-```bash
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-```
-
-### Windows
-
-```powershell
-py -m venv .venv
-.\.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-## تنظیمات
-
-فایل نمونه را کپی کن:
-
-### Linux
-
-```bash
-cp .env.example .env
-```
+Python 3.10+ پیشنهاد می‌شود.
 
 ### Windows PowerShell
 
 ```powershell
+git clone https://github.com/Iman-gholami/balebot-.git
+cd balebot-
+py -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install -r requirements.txt
 Copy-Item .env.example .env
 ```
 
-بعد فایل `.env` را پر کن:
+### Linux
 
-```text
-BALE_BOT_TOKEN=توکن_ربات
-BALE_SOURCE_CHANNEL_ID=شناسه_کانال
-BALE_DESTINATION_CHAT_ID=شناسه_اکانت_مقصد
+```bash
+git clone https://github.com/Iman-gholami/balebot-.git
+cd balebot-
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+cp .env.example .env
 ```
 
-> توکن Bot را داخل GitHub commit نکن. فایل `.env` در `.gitignore` قرار دارد.
+## 2) ورود به اکانت بله
 
-## پیدا کردن Chat ID مقصد
-
-برنامه را با توکن Bot اجرا کن و در اکانت مقصد به Bot این دستور را بفرست:
-
-```text
-/id
+```bash
+python login.py
 ```
 
-Bot جواب می‌دهد:
+شماره موبایل اکانتی را وارد کنید که عضو کانال خبرگزاری است.
 
-```text
-Chat ID: 123456789
+کد OTP برای همان اکانت ارسال می‌شود. بعد از وارد کردن کد، `BALE_TOKEN` داخل فایل محلی `.env` ذخیره می‌شود.
+
+فایل `.env` در `.gitignore` است و نباید روی GitHub قرار بگیرد.
+
+## 3) پیدا کردن شناسه کانال و مقصد
+
+```bash
+python list_dialogs.py
 ```
 
-این عدد را در `BALE_DESTINATION_CHAT_ID` قرار بده.
+خروجی نمونه:
 
-## پیدا کردن Channel ID
+```text
+channel:123456789    News Channel
+user:987654321       Ali
+```
 
-ابتدا می‌توانی `BALE_SOURCE_CHANNEL_ID` را در `.env` خالی بگذاری و Bot را به کانال اضافه کنی.
+سپس در `.env` تنظیم کنید:
 
-برای گرفتن شناسه کانال، از خروجی `getUpdates` بله یا ابزار مدیریت Bot استفاده کن و مقدار `chat.id` مربوط به `channel_post` را در `BALE_SOURCE_CHANNEL_ID` قرار بده.
+```text
+BALE_SOURCE=channel:123456789
+BALE_DESTINATION=user:987654321
+```
 
-بعد از تنظیم این مقدار، Bot فایل‌های کانال‌های دیگر را نادیده می‌گیرد.
+اگر کانال یا کاربر username عمومی دارد، می‌توانید مستقیماً استفاده کنید:
 
-## اجرا
+```text
+BALE_SOURCE=@news_username
+BALE_DESTINATION=@destination_username
+```
+
+## 4) اجرای تست
 
 ```bash
 python bot.py
 ```
 
-وقتی اجرا شود، منتظر فایل‌های جدید می‌ماند.
+ابتدا باید لاگی شبیه این ببینید:
 
-## فرمت Excel
+```text
+Logged in as ...
+Source: ...
+Today's target: NEW_FIRE_14050717_IPS.xlsx
+```
 
-Bot سعی می‌کند ستون‌ها را از روی عنوان پیدا کند.
+اگر فایل امروز قبلاً در history کانال باشد، لازم نیست دوباره در کانال ارسال شود. برنامه تا `HISTORY_LIMIT` پیام آخر را جستجو می‌کند.
 
-نام‌های شناخته‌شده برای IP شامل:
+اگر هنوز فایل منتشر نشده باشد:
+
+```text
+Today's file not found yet: NEW_FIRE_...
+```
+
+برنامه هر `CHECK_INTERVAL` ثانیه دوباره بررسی می‌کند.
+
+## Excel
+
+عنوان‌های رایج IP:
 
 ```text
 IP
@@ -114,7 +123,7 @@ sourceip
 destinationip
 ```
 
-نام‌های شناخته‌شده برای کشور شامل:
+عنوان‌های رایج Country:
 
 ```text
 Country
@@ -123,40 +132,28 @@ Location
 Country Code
 ```
 
-اگر عنوان ستون IP قابل تشخیص نباشد، Bot فرض می‌کند:
+اگر header قابل تشخیص نباشد:
 
 - ستون A = IP
 - ستون B = Country
 
-فقط IPv4 معتبر شمرده می‌شود و وقتی حداقل ۱۰ IP پیدا شود، پیام ارسال می‌شود.
-
-## نمونه پیام خروجی
+## خروجی
 
 ```text
-NEW_FIRE_14050715_IPS
+NEW_FIRE_14050717_IPS
 
 1. 185.10.20.30 - Iran
 2. 91.100.20.5 - Germany
-3. 45.12.55.20 - France
-4. ...
-5. ...
-6. ...
-7. ...
-8. ...
-9. ...
+...
 10. 8.8.8.8 - United States
 ```
 
-## جلوگیری از ارسال دوباره
-
-بعد از ارسال موفق، شناسه فایل در فایل محلی زیر ذخیره می‌شود:
+## تنظیمات مهم
 
 ```text
-processed_files.json
+BALE_TIMEZONE=Asia/Tehran
+CHECK_INTERVAL=60
+HISTORY_LIMIT=100
 ```
 
-بنابراین اگر همان فایل دوباره در کانال فرستاده شود، مجدداً برای مقصد ارسال نمی‌شود.
-
-## نکته
-
-Parser فعلی با `openpyxl` است و برای فایل‌های `.xlsx` طراحی شده است. اگر فایل واقعی شما فرمت قدیمی `.xls` باشد باید پشتیبانی جداگانه اضافه شود.
+اگر کانال در یک روز بیشتر از ۱۰۰ پیام دارد، `HISTORY_LIMIT` را بیشتر کنید.
