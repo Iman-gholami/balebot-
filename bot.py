@@ -41,7 +41,11 @@ def today_jalali_code() -> str:
 
 
 def expected_filename() -> str:
-    return f"NEW_FIRE_{today_jalali_code()}_IPS.xlsx"
+    return f"NEW_FIRE_{today_jalali_code()}_IPS"
+
+
+def file_stem(name: str) -> str:
+    return re.sub(r"\.[^.]+$", "", name.strip())
 
 
 def ref_from_config(value: str):
@@ -227,7 +231,7 @@ async def find_today_file(client: BaleClient, source_ref):
         if not media:
             continue
         name = (media.name or "").strip()
-        if name.lower() == target:
+        if file_stem(name).lower() == target:
             return message, media
     return None, None
 
