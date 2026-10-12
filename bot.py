@@ -1,11 +1,12 @@
 import asyncio
 import csv
+import fcntl
 import json
 import logging
 import os
 import re
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from io import BytesIO, StringIO
 from pathlib import Path
 from zoneinfo import ZoneInfo
@@ -29,6 +30,7 @@ CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 MAX_WAIT_MINUTES = int(os.environ.get("MAX_WAIT_MINUTES", "360"))
 HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "100"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "processed_files.json"))
+LOCK_FILE = Path(os.environ.get("LOCK_FILE", ".balebot.lock"))
 
 logging.basicConfig(
     level=os.environ.get("LOG_LEVEL", "INFO"),
@@ -60,22 +62,66 @@ def ref_from_config(value: str):
     return value
 
 
-def load_processed() -> set[str]:
+def load_state() -> dict:
+    default = {"days": {}}
     if not STATE_FILE.exists():
-        return set()
+        return default
+
     try:
         data = json.loads(STATE_FILE.read_text(encoding="utf-8"))
-        return set(data if isinstance(data, list) else [])
+
+        # Backward compatibility with the old list-based state format.
+        if isinstance(data, list):
+            return default
+
+        if not isinstance(data, dict):
+            return default
+
+        days = data.get("days")
+        if not isinstance(days, dict):
+            data["days"] = {}
+
+        return data
     except Exception:
         log.exception("Could not read state file; starting empty.")
-        return set()
+        return default
 
 
-def save_processed(processed: set[str]):
-    STATE_FILE.write_text(
-        json.dumps(sorted(processed), ensure_ascii=False, indent=2),
+def save_state(state: dict):
+    temp = STATE_FILE.with_suffix(STATE_FILE.suffix + ".tmp")
+    temp.write_text(
+        json.dumps(state, ensure_ascii=False, indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    temp.replace(STATE_FILE)
+
+
+def previous_jalali_code() -> str:
+    local_date = datetime.now(ZoneInfo(TIMEZONE)).date() - timedelta(days=1)
+    jalali = jdatetime.date.fromgregorian(date=local_date)
+    return f"{jalali.year:04d}{jalali.month:02d}{jalali.day:02d}"
+
+
+def same_ten_ips(today_rows, yesterday_ips) -> bool:
+    if len(today_rows) != 10 or not isinstance(yesterday_ips, list) or len(yesterday_ips) != 10:
+        return False
+
+    today_ips = [ip for ip, _country in today_rows]
+    # Order does not matter, but duplicates do.
+    return sorted(today_ips) == sorted(str(ip) for ip in yesterday_ips)
+
+
+def acquire_process_lock():
+    LOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+    lock_handle = LOCK_FILE.open("w")
+    try:
+        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except BlockingIOError:
+        lock_handle.close()
+        return None
+    lock_handle.write(str(os.getpid()))
+    lock_handle.flush()
+    return lock_handle
 
 
 def normalize_header(value) -> str:
@@ -281,6 +327,13 @@ def build_message(file_name: str, rows) -> str:
     return "\n".join(lines)
 
 
+def build_unchanged_message() -> str:
+    return (
+        "🔔 معرفی جهت مسدودسازی\n"
+        "📋 هر ۱۰ آدرس IP امروز دقیقاً با روز قبل یکسان است."
+    )
+
+
 async def resolve_source(client: BaleClient):
     configured = ref_from_config(SOURCE)
     if SOURCE.startswith("@") or SOURCE.startswith("channel:") or SOURCE.startswith("group:"):
@@ -353,31 +406,62 @@ async def find_today_file(client: BaleClient, source_ref):
     return None, None
 
 
-async def process_once(client: BaleClient, source_ref, processed: set[str]) -> bool:
+async def process_once(client: BaleClient, source_ref, state: dict) -> bool:
+    today_code = today_jalali_code()
+    days = state.setdefault("days", {})
+
+    # Idempotency by calendar day: never send twice for the same date.
+    if today_code in days and days[today_code].get("sent"):
+        log.info("Already processed today: %s", today_code)
+        return True
+
     message, media = await find_today_file(client, source_ref)
     if not media:
         log.info("Today's file not found yet: %s", expected_filename())
         return False
 
-    key = f"{today_jalali_code()}:{media.file_id}:{message.rid}"
-    if key in processed:
-        log.info("Already processed today: %s", media.name)
-        return True
-
     log.info("Found today's file: %s", media.name)
-    excel_bytes = await download_media(client, media)
-    rows = extract_first_ten(excel_bytes)
+    file_bytes = await download_media(client, media)
+    rows = extract_first_ten(file_bytes)
 
     if len(rows) < 10:
         raise RuntimeError(
             f"Only {len(rows)} valid IPv4 rows found in {media.name}; expected at least 10"
         )
 
-    await client.send_message(ref_from_config(DESTINATION), build_message(media.name, rows))
+    yesterday_code = previous_jalali_code()
+    yesterday = days.get(yesterday_code, {})
+    yesterday_ips = yesterday.get("ips") if isinstance(yesterday, dict) else None
+    unchanged = same_ten_ips(rows, yesterday_ips)
 
-    processed.add(key)
-    save_processed(processed)
-    log.info("Sent 10 IP rows to destination.")
+    if unchanged:
+        await client.send_message(
+            ref_from_config(DESTINATION),
+            build_unchanged_message(),
+        )
+        log.info("All 10 IPs are identical to previous day (%s).", yesterday_code)
+    else:
+        await client.send_message(
+            ref_from_config(DESTINATION),
+            build_message(media.name, rows),
+        )
+        if yesterday_ips is None:
+            log.info("No processed file for previous calendar day (%s); sent normal list.", yesterday_code)
+        else:
+            log.info("Today's IPs differ from previous day; sent normal list.")
+
+    days[today_code] = {
+        "sent": True,
+        "file_name": media.name,
+        "message_rid": int(message.rid),
+        "file_id": int(media.file_id),
+        "ips": [ip for ip, _country in rows],
+        "unchanged_from_previous_day": unchanged,
+        "compared_with": yesterday_code if yesterday_ips is not None else None,
+    }
+    save_state(state)
+
+    log.info("Daily state saved for %s.", today_code)
     return True
 
 
@@ -389,7 +473,12 @@ async def main():
     if not DESTINATION:
         raise SystemExit("BALE_DESTINATION is missing. Run: python list_dialogs.py")
 
-    processed = load_processed()
+    lock_handle = acquire_process_lock()
+    if lock_handle is None:
+        log.warning("Another balebot process is already running. Exiting.")
+        return
+
+    state = load_state()
 
     async with BaleClient(BALE_TOKEN) as client:
         me = await client.get_me()
@@ -408,7 +497,7 @@ async def main():
 
         while True:
             try:
-                done = await process_once(client, source_ref, processed)
+                done = await process_once(client, source_ref, state)
                 if done:
                     log.info("Daily job completed. Exiting.")
                     return
