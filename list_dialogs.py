@@ -20,8 +20,14 @@ async def main():
 
         dialogs = await client.get_dialogs(limit=300)
         for d in dialogs:
-            kind = "user" if d.is_user else "channel"
-            print(f"{kind}:{d.id}\t{d.title or '(no title)'}")
+            if d.is_user:
+                print(f"user:{d.id}\t{d.title or '(no title)'}")
+            else:
+                # Bale uses the same peer type for groups and broadcast channels.
+                print(
+                    f"group/channel:{d.id}\t{d.title or '(no title)'}"
+                    f"\t(use channel:{d.id} in .env)"
+                )
 
 
 if __name__ == "__main__":
