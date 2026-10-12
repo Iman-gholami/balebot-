@@ -406,7 +406,7 @@ async def find_today_file(client: BaleClient, source_ref):
     return None, None
 
 
-async def process_once(client: BaleClient, source_ref, state: dict) -> bool:
+async def process_once(client: BaleClient, source_ref, destination_ref, state: dict) -> bool:
     today_code = today_jalali_code()
     days = state.setdefault("days", {})
 
@@ -435,16 +435,18 @@ async def process_once(client: BaleClient, source_ref, state: dict) -> bool:
     unchanged = same_ten_ips(rows, yesterday_ips)
 
     if unchanged:
-        await client.send_message(
-            ref_from_config(DESTINATION),
+        sent = await client.send_message(
+            destination_ref,
             build_unchanged_message(),
         )
+        log.info("Message send returned: %r", sent)
         log.info("All 10 IPs are identical to previous day (%s).", yesterday_code)
     else:
-        await client.send_message(
-            ref_from_config(DESTINATION),
+        sent = await client.send_message(
+            destination_ref,
             build_message(media.name, rows),
         )
+        log.info("Message send returned: %r", sent)
         if yesterday_ips is None:
             log.info("No processed file for previous calendar day (%s); sent normal list.", yesterday_code)
         else:
@@ -486,18 +488,28 @@ async def main():
 
         source_ref = await resolve_source(client)
         source_info = await client.resolve(source_ref)
+
+        destination_ref = ref_from_config(DESTINATION)
+        destination_info = await client.resolve(destination_ref)
+
         log.info(
             "Source: %s (id=%s). Today's target: %s",
             source_info.title,
             source_info.peer.id,
             expected_filename(),
         )
+        log.info(
+            "Destination: %s (id=%s, configured=%s)",
+            destination_info.title,
+            destination_info.peer.id,
+            DESTINATION,
+        )
 
         deadline = asyncio.get_running_loop().time() + (MAX_WAIT_MINUTES * 60)
 
         while True:
             try:
-                done = await process_once(client, source_ref, state)
+                done = await process_once(client, source_ref, destination_ref, state)
                 if done:
                     log.info("Daily job completed. Exiting.")
                     return
