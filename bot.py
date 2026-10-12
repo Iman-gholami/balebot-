@@ -45,8 +45,12 @@ def today_jalali_code() -> str:
     return f"{jalali.year:04d}{jalali.month:02d}{jalali.day:02d}"
 
 
+def expected_filename_for(jalali_code: str) -> str:
+    return f"NEW_FIRE_{jalali_code}_IPS"
+
+
 def expected_filename() -> str:
-    return f"NEW_FIRE_{today_jalali_code()}_IPS"
+    return expected_filename_for(today_jalali_code())
 
 
 def file_stem(name: str) -> str:
@@ -393,8 +397,8 @@ async def download_media(client: BaleClient, media) -> bytes:
     return await asyncio.to_thread(_download)
 
 
-async def find_today_file(client: BaleClient, source_ref):
-    target = expected_filename().lower()
+async def find_file_by_target(client: BaleClient, source_ref, target_name: str):
+    target = target_name.lower()
     async for message in client.iter_messages(source_ref, limit=HISTORY_LIMIT):
         content = message.content
         media = getattr(content, "media", None)
@@ -404,6 +408,33 @@ async def find_today_file(client: BaleClient, source_ref):
         if file_stem(name).lower() == target:
             return message, media
     return None, None
+
+
+async def find_today_file(client: BaleClient, source_ref):
+    return await find_file_by_target(client, source_ref, expected_filename())
+
+
+async def load_previous_day_ips(client: BaleClient, source_ref):
+    yesterday_code = previous_jalali_code()
+    target = expected_filename_for(yesterday_code)
+
+    _message, media = await find_file_by_target(client, source_ref, target)
+    if not media:
+        log.info("Previous day's file not found in source: %s", target)
+        return yesterday_code, None
+
+    log.info("Found previous day's file for comparison: %s", media.name)
+    file_bytes = await download_media(client, media)
+    rows = extract_first_ten(file_bytes)
+
+    if len(rows) < 10:
+        log.warning(
+            "Previous day's file contains only %s valid IPv4 rows; skipping comparison.",
+            len(rows),
+        )
+        return yesterday_code, None
+
+    return yesterday_code, [ip for ip, _country in rows]
 
 
 async def process_once(client: BaleClient, source_ref, destination_ref, state: dict) -> bool:
@@ -430,8 +461,15 @@ async def process_once(client: BaleClient, source_ref, destination_ref, state: d
         )
 
     yesterday_code = previous_jalali_code()
+
+    # Prefer locally saved state, but if it is missing (fresh deploy/state loss),
+    # fetch yesterday's actual source file and compare against that.
     yesterday = days.get(yesterday_code, {})
     yesterday_ips = yesterday.get("ips") if isinstance(yesterday, dict) else None
+
+    if yesterday_ips is None:
+        yesterday_code, yesterday_ips = await load_previous_day_ips(client, source_ref)
+
     unchanged = same_ten_ips(rows, yesterday_ips)
 
     if unchanged:
@@ -448,7 +486,7 @@ async def process_once(client: BaleClient, source_ref, destination_ref, state: d
         )
         log.info("Message send returned: %r", sent)
         if yesterday_ips is None:
-            log.info("No processed file for previous calendar day (%s); sent normal list.", yesterday_code)
+            log.info("No usable file for previous calendar day (%s); sent normal list.", yesterday_code)
         else:
             log.info("Today's IPs differ from previous day; sent normal list.")
 
