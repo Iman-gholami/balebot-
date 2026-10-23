@@ -519,49 +519,74 @@ async def main():
         return
 
     state = load_state()
+    deadline = asyncio.get_running_loop().time() + (MAX_WAIT_MINUTES * 60)
 
-    async with BaleClient(BALE_TOKEN) as client:
-        me = await client.get_me()
-        log.info("Logged in as %s (user id=%s)", me.title, me.peer.id)
+    while True:
+        if asyncio.get_running_loop().time() >= deadline:
+            log.warning(
+                "Today's file was not successfully processed within %s minutes. Exiting.",
+                MAX_WAIT_MINUTES,
+            )
+            return
 
-        source_ref = await resolve_source(client)
-        source_info = await client.resolve(source_ref)
+        try:
+            async with BaleClient(BALE_TOKEN) as client:
+                me = await client.get_me()
+                log.info("Logged in as %s (user id=%s)", me.title, me.peer.id)
 
-        destination_ref = ref_from_config(DESTINATION)
-        destination_info = await client.resolve(destination_ref)
+                source_ref = await resolve_source(client)
+                source_info = await client.resolve(source_ref)
 
-        log.info(
-            "Source: %s (id=%s). Today's target: %s",
-            source_info.title,
-            source_info.peer.id,
-            expected_filename(),
-        )
-        log.info(
-            "Destination: %s (id=%s, configured=%s)",
-            destination_info.title,
-            destination_info.peer.id,
-            DESTINATION,
-        )
+                destination_ref = ref_from_config(DESTINATION)
+                destination_info = await client.resolve(destination_ref)
 
-        deadline = asyncio.get_running_loop().time() + (MAX_WAIT_MINUTES * 60)
-
-        while True:
-            try:
-                done = await process_once(client, source_ref, destination_ref, state)
-                if done:
-                    log.info("Daily job completed. Exiting.")
-                    return
-            except Exception:
-                log.exception("Daily processing failed.")
-
-            if asyncio.get_running_loop().time() >= deadline:
-                log.warning(
-                    "Today's file was not successfully processed within %s minutes. Exiting.",
-                    MAX_WAIT_MINUTES,
+                log.info(
+                    "Source: %s (id=%s). Today's target: %s",
+                    source_info.title,
+                    source_info.peer.id,
+                    expected_filename(),
                 )
-                return
+                log.info(
+                    "Destination: %s (id=%s, configured=%s)",
+                    destination_info.title,
+                    destination_info.peer.id,
+                    DESTINATION,
+                )
 
-            await asyncio.sleep(CHECK_INTERVAL)
+                while True:
+                    try:
+                        done = await process_once(client, source_ref, destination_ref, state)
+                        if done:
+                            log.info("Daily job completed. Exiting.")
+                            return
+                    except RuntimeError as exc:
+                        if "not connected" in str(exc).lower():
+                            log.warning("Bale connection lost; reconnecting with a fresh client.")
+                            break
+                        log.exception("Daily processing failed.")
+                    except Exception:
+                        log.exception("Daily processing failed.")
+
+                    if asyncio.get_running_loop().time() >= deadline:
+                        log.warning(
+                            "Today's file was not successfully processed within %s minutes. Exiting.",
+                            MAX_WAIT_MINUTES,
+                        )
+                        return
+
+                    await asyncio.sleep(CHECK_INTERVAL)
+
+        except Exception:
+            log.exception("Bale client session failed; retrying with a fresh connection.")
+
+        if asyncio.get_running_loop().time() >= deadline:
+            log.warning(
+                "Today's file was not successfully processed within %s minutes. Exiting.",
+                MAX_WAIT_MINUTES,
+            )
+            return
+
+        await asyncio.sleep(min(CHECK_INTERVAL, 60))
 
 
 if __name__ == "__main__":
