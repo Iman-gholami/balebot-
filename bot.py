@@ -612,7 +612,7 @@ async def load_previous_day_ips(client: BaleClient, source_ref):
     return yesterday_code, [ip for ip, _country in rows]
 
 
-async def process_once(client: BaleClient, source_ref, destination_ref, state: dict) -> bool:
+async def process_once(client: BaleClient, destination_ref, state: dict) -> bool:
     today_code = today_jalali_code()
     days = state.setdefault("days", {})
 
@@ -678,8 +678,6 @@ async def process_once(client: BaleClient, source_ref, destination_ref, state: d
 async def main():
     if not BALE_TOKEN:
         raise SystemExit("BALE_TOKEN is missing. Run: python login.py")
-    if not SOURCE:
-        raise SystemExit("BALE_SOURCE is missing. Run: python list_dialogs.py")
     if not DESTINATION:
         raise SystemExit("BALE_DESTINATION is missing. Run: python list_dialogs.py")
 
@@ -704,18 +702,10 @@ async def main():
                 me = await client.get_me()
                 log.info("Logged in as %s (user id=%s)", me.title, me.peer.id)
 
-                source_ref = await resolve_source(client)
-                source_info = await client.resolve(source_ref)
-
                 destination_ref = ref_from_config(DESTINATION)
                 destination_info = await client.resolve(destination_ref)
 
-                log.info(
-                    "Source: %s (id=%s). Today's target: %s",
-                    source_info.title,
-                    source_info.peer.id,
-                    expected_filename(),
-                )
+                log.info("Today's target: %s", expected_filename())
                 log.info(
                     "Destination: %s (id=%s, configured=%s)",
                     destination_info.title,
@@ -725,7 +715,7 @@ async def main():
 
                 while True:
                     try:
-                        done = await process_once(client, source_ref, destination_ref, state)
+                        done = await process_once(client, destination_ref, state)
                         if done:
                             log.info("Daily job completed. Exiting.")
                             return
