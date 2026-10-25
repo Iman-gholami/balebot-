@@ -7,8 +7,10 @@ import os
 import re
 import zipfile
 from datetime import datetime, timedelta
+from html.parser import HTMLParser
 from io import BytesIO, StringIO
 from pathlib import Path
+from urllib.parse import unquote, urljoin, urlparse
 from zoneinfo import ZoneInfo
 
 import jdatetime
@@ -29,6 +31,8 @@ TIMEZONE = os.environ.get("BALE_TIMEZONE", "Asia/Tehran").strip()
 CHECK_INTERVAL = int(os.environ.get("CHECK_INTERVAL", "60"))
 MAX_WAIT_MINUTES = int(os.environ.get("MAX_WAIT_MINUTES", "360"))
 HISTORY_LIMIT = int(os.environ.get("HISTORY_LIMIT", "100"))
+AFTA_INDEX_URL = os.environ.get("AFTA_INDEX_URL", "https://afta.gov.ir/XYp").strip()
+AFTA_MAX_DOWNLOAD_MB = int(os.environ.get("AFTA_MAX_DOWNLOAD_MB", "25"))
 STATE_FILE = Path(os.environ.get("STATE_FILE", "processed_files.json"))
 LOCK_FILE = Path(os.environ.get("LOCK_FILE", ".balebot.lock"))
 
@@ -319,6 +323,177 @@ def extract_first_ten(file_bytes: bytes):
     return _extract_rows_from_xlsx(data_bytes)
 
 
+
+class _LinkCollector(HTMLParser):
+    def __init__(self):
+        super().__init__()
+        self.links = []
+        self._href = None
+        self._text = []
+
+    def handle_starttag(self, tag, attrs):
+        if tag.lower() == "a":
+            self._href = dict(attrs).get("href")
+            self._text = []
+
+    def handle_data(self, data):
+        if self._href is not None:
+            self._text.append(data)
+
+    def handle_endtag(self, tag):
+        if tag.lower() == "a" and self._href is not None:
+            self.links.append((self._href, " ".join(self._text).strip()))
+            self._href = None
+            self._text = []
+
+
+def _today_jalali_variants() -> tuple[str, ...]:
+    code = today_jalali_code()
+    year, month, day = code[:4], code[4:6], code[6:8]
+    return (
+        code,
+        f"{year}.{month}.{day}",
+        f"{year}_{month}_{day}",
+        f"{year}-{month}-{day}",
+    )
+
+
+def _archive_looks_like_today(data: bytes, filename: str = "") -> bool:
+    variants = tuple(v.lower() for v in _today_jalali_variants())
+    lower_name = (filename or "").lower()
+
+    if any(v in lower_name for v in variants):
+        return True
+
+    try:
+        with zipfile.ZipFile(BytesIO(data)) as archive:
+            names = [n.lower() for n in archive.namelist()]
+            return any(any(v in n for v in variants) for n in names)
+    except Exception:
+        return False
+
+
+def _response_filename(response) -> str:
+    disposition = response.headers.get("Content-Disposition", "")
+    match = re.search(r"filename\*?=(?:UTF-8''|\")?([^\";]+)", disposition, re.I)
+    if match:
+        return unquote(match.group(1).strip().strip('"'))
+    return Path(urlparse(response.url).path).name
+
+
+def _candidate_score(url: str, text: str) -> tuple:
+    combined = f"{url} {text}".lower()
+    return (
+        0 if "new_fire" in combined else 1,
+        0 if ".zip" in combined else 1,
+        0 if "شاخص" in combined and "آلودگی" in combined else 1,
+        0 if "دانلود" in combined else 1,
+        len(url),
+    )
+
+
+def _download_afta_archive_sync() -> tuple[bytes, str]:
+    session = requests.Session()
+    session.headers.update({
+        "User-Agent": (
+            "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+        ),
+        "Accept-Language": "fa-IR,fa;q=0.9,en;q=0.7",
+    })
+
+    max_bytes = AFTA_MAX_DOWNLOAD_MB * 1024 * 1024
+    start_host = urlparse(AFTA_INDEX_URL).netloc.lower()
+    queue = [(AFTA_INDEX_URL, 0)]
+    visited = set()
+    last_error = None
+
+    while queue:
+        url, depth = queue.pop(0)
+        if url in visited or depth > 3:
+            continue
+        visited.add(url)
+
+        try:
+            response = session.get(url, timeout=45, allow_redirects=True, stream=True)
+            response.raise_for_status()
+
+            final_host = urlparse(response.url).netloc.lower()
+            if final_host and start_host and final_host != start_host:
+                raise RuntimeError(
+                    f"AFTA link redirected outside expected host: {response.url}"
+                )
+
+            content_type = response.headers.get("Content-Type", "").lower()
+            filename = _response_filename(response)
+
+            # Download file responses in a bounded way.
+            if (
+                "zip" in content_type
+                or filename.lower().endswith(".zip")
+                or "octet-stream" in content_type
+            ):
+                chunks = []
+                total = 0
+                for chunk in response.iter_content(chunk_size=65536):
+                    if not chunk:
+                        continue
+                    total += len(chunk)
+                    if total > max_bytes:
+                        raise RuntimeError(
+                            f"AFTA download exceeded {AFTA_MAX_DOWNLOAD_MB} MB limit."
+                        )
+                    chunks.append(chunk)
+                data = b"".join(chunks)
+
+                if zipfile.is_zipfile(BytesIO(data)):
+                    if not _archive_looks_like_today(data, filename):
+                        log.info("Skipping archive that does not match today's Jalali date: %s", filename)
+                        continue
+                    return data, filename or "AFTA_NEW_FIRE.zip"
+
+            # HTML page: collect links and continue crawling.
+            body = response.content
+            if len(body) > 5 * 1024 * 1024:
+                raise RuntimeError("AFTA HTML page is unexpectedly large.")
+
+            text = body.decode(response.encoding or "utf-8", errors="replace")
+            parser = _LinkCollector()
+            parser.feed(text)
+
+            links = []
+            for href, anchor_text in parser.links:
+                if not href:
+                    continue
+                absolute = urljoin(response.url, href.strip())
+                parsed = urlparse(absolute)
+                if parsed.scheme not in ("http", "https"):
+                    continue
+                if parsed.netloc.lower() != start_host:
+                    continue
+                links.append((absolute, anchor_text))
+
+            links.sort(key=lambda item: _candidate_score(item[0], item[1]))
+            for absolute, anchor_text in links:
+                if absolute not in visited:
+                    queue.append((absolute, depth + 1))
+
+        except Exception as exc:
+            last_error = exc
+            log.warning("AFTA fetch failed for %s: %s", url, exc)
+
+    if last_error:
+        raise RuntimeError(f"Could not locate today's AFTA ZIP: {last_error}")
+    raise RuntimeError("Could not locate today's AFTA ZIP from the configured AFTA page.")
+
+
+async def download_today_from_afta() -> tuple[bytes, str]:
+    log.info("Checking AFTA download page: %s", AFTA_INDEX_URL)
+    data, filename = await asyncio.to_thread(_download_afta_archive_sync)
+    log.info("Downloaded today's AFTA archive: %s (%s bytes)", filename, len(data))
+    return data, filename
+
+
 def build_message(file_name: str, rows) -> str:
     lines = [
         "🔔 معرفی جهت مسدودسازی",
@@ -446,18 +621,17 @@ async def process_once(client: BaleClient, source_ref, destination_ref, state: d
         log.info("Already processed today: %s", today_code)
         return True
 
-    message, media = await find_today_file(client, source_ref)
-    if not media:
-        log.info("Today's file not found yet: %s", expected_filename())
+    try:
+        file_bytes, source_file_name = await download_today_from_afta()
+    except Exception as exc:
+        log.info("Today's AFTA file is not available yet: %s", exc)
         return False
 
-    log.info("Found today's file: %s", media.name)
-    file_bytes = await download_media(client, media)
     rows = extract_first_ten(file_bytes)
 
     if len(rows) < 10:
         raise RuntimeError(
-            f"Only {len(rows)} valid IPv4 rows found in {media.name}; expected at least 10"
+            f"Only {len(rows)} valid IPv4 rows found in {source_file_name}; expected at least 10"
         )
 
     yesterday_code = previous_jalali_code()
@@ -466,9 +640,6 @@ async def process_once(client: BaleClient, source_ref, destination_ref, state: d
     # fetch yesterday's actual source file and compare against that.
     yesterday = days.get(yesterday_code, {})
     yesterday_ips = yesterday.get("ips") if isinstance(yesterday, dict) else None
-
-    if yesterday_ips is None:
-        yesterday_code, yesterday_ips = await load_previous_day_ips(client, source_ref)
 
     unchanged = same_ten_ips(rows, yesterday_ips)
 
@@ -492,9 +663,8 @@ async def process_once(client: BaleClient, source_ref, destination_ref, state: d
 
     days[today_code] = {
         "sent": True,
-        "file_name": media.name,
-        "message_rid": int(message.rid),
-        "file_id": int(media.file_id),
+        "file_name": source_file_name,
+        "source": AFTA_INDEX_URL,
         "ips": [ip for ip, _country in rows],
         "unchanged_from_previous_day": unchanged,
         "compared_with": yesterday_code if yesterday_ips is not None else None,
