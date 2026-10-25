@@ -653,7 +653,7 @@ async def process_once(client: BaleClient, destination_ref, state: dict) -> bool
     else:
         sent = await client.send_message(
             destination_ref,
-            build_message(media.name, rows),
+            build_message(source_file_name, rows),
         )
         log.info("Message send returned: %r", sent)
         if yesterday_ips is None:
